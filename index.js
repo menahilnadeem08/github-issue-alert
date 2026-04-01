@@ -62,15 +62,27 @@ async function checkIssues() {
     const res = await axios.get(
       `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
       { headers }
+      
     );
+      console.log(`Issue #${res.data.number} has internal ID: ${res.data.id}`);
+
 
     const issues = res.data.filter(item => !item.pull_request);
 
     const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
 
-    if (newIssues.length === 0) {
-      console.log(`[${now()}] Checked — no new issues. Last sent ID: ${sentIssues.slice(-1)[0] || "none"}`);
-    }
+if (newIssues.length === 0) {
+  const lastSentId = sentIssues.slice(-1)[0] || "none";
+  let lastNumber = "none";
+
+  // Try to get the issue number for the last sent ID
+  if (lastSentId !== "none") {
+    const lastIssue = issues.find(i => i.id.toString() === lastSentId);
+    if (lastIssue) lastNumber = lastIssue.number;
+  }
+
+  console.log(`[${now()}] Checked — no new issues. Last sent: Number: ${lastNumber}, ID: ${lastSentId}`);
+}
 
     for (const issue of newIssues.reverse()) { // send oldest first
       const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
