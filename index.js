@@ -87,4 +87,4 @@ async function checkIssues() {
 }
 
 checkIssues(); // run immediately
-setInterval(checkIssues, 1 * 60 * 1000);
+setInterval(checkIssues, 5 * 60 * 1000);
