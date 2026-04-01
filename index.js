@@ -1,69 +1,91 @@
 const axios = require("axios");
 const express = require("express");
+const fs = require("fs");
 
 // Environment variables
-const REPO = process.env.REPO;                        // e.g., Expensify/App
-const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;      // Google Chat webhook URL
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;        // optional, helps avoid 403 rate limit
+const REPO = process.env.REPO;                        
+const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;      
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;        
 
 if (!REPO || !WEBHOOK) {
   console.error("Error: REPO or GOOGLE_CHAT_WEBHOOK not set in environment variables.");
   process.exit(1);
 }
 
-// Optional headers for GitHub API
+// Optional GitHub headers
 const headers = {};
-if (GITHUB_TOKEN) {
-  headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
+
+// Track sent issues to avoid duplicates
+const SENT_FILE = "sent_issues.json";
+let sentIssues = [];
+if (fs.existsSync(SENT_FILE)) {
+  sentIssues = JSON.parse(fs.readFileSync(SENT_FILE, "utf-8"));
 }
 
-let lastIssue = null;
+// Lock to prevent concurrent sends
+let sending = false;
 
-// Get Pakistan local time in 24-hour format
+// Pakistan local time
 function now() {
   return new Date().toLocaleString('en-PK', { hour12: false });
 }
 
+// Save sent issues
+function saveSentIssues() {
+  fs.writeFileSync(SENT_FILE, JSON.stringify(sentIssues), "utf-8");
+}
+
+// Main check function
 async function checkIssues() {
+  if (sending) return;
+  sending = true;
+
   try {
     const res = await axios.get(
-      `https://api.github.com/repos/${REPO}/issues?per_page=5&state=open&sort=created&direction=desc`,
+      `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
       { headers }
     );
 
     // Only real issues (exclude pull requests)
     const issues = res.data.filter(item => !item.pull_request);
 
-    if (issues.length === 0) {
-      console.log(`[${now()}] Checked — no issues found`);
-      return;
+    // Filter issues that haven't been sent
+    const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
+
+    if (newIssues.length === 0) {
+      console.log(`[${now()}] Checked — no new issues`);
     }
 
-    const issue = issues[0];
-
-    if (lastIssue !== issue.id) {
-      lastIssue = issue.id;
-
+    // Send each new issue
+    for (const issue of newIssues.reverse()) { // reverse to send oldest first
       await axios.post(WEBHOOK, {
         text: `New Issue Opened\n${issue.title}\n${issue.html_url}`
       });
-
       console.log(`[${now()}] Sent: ${issue.title}`);
-    } else {
-      console.log(`[${now()}] Checked — no new issue`);
+      sentIssues.push(issue.id.toString());
     }
+
+    saveSentIssues();
 
   } catch (err) {
     console.log(`[${now()}] Error:`, err.message);
+  } finally {
+    sending = false;
   }
 }
 
-// Run immediately, then every 60 seconds
+// Run immediately, then every minute
 checkIssues();
-setInterval(checkIssues, 60000);
+setInterval(checkIssues, 60 * 1000);
 
-// Minimal HTTP server for Render port detection & free-tier ping
+// Minimal HTTP server for Render
 const app = express();
 app.get("/", (req, res) => res.send("GitHub Issue Notifier Alive"));
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
+
+// Self-ping to keep free-tier awake
+setInterval(() => {
+  axios.get(`http://localhost:${port}/`).catch(() => {});
+}, 5 * 60 * 1000);
