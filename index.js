@@ -58,13 +58,34 @@ async function checkIssues() {
     }
 
     // Send each new issue
-    for (const issue of newIssues.reverse()) { // reverse to send oldest first
-      await axios.post(WEBHOOK, {
-        text: `New Issue Opened\n${issue.title}\n${issue.html_url}`
-      });
-      console.log(`[${now()}] Sent: ${issue.title}`);
-      sentIssues.push(issue.id.toString());
-    }
+for (const issue of newIssues.reverse()) { // send oldest first
+  // Extract labels
+  const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
+
+  // Send to Google Chat using a simple card
+  await axios.post(WEBHOOK, {
+    cards: [
+      {
+        header: {
+          title: `New Issue Opened`,
+          subtitle: `Repo: ${REPO}`,
+        },
+        sections: [
+          {
+            widgets: [
+              { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
+              { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
+              { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
+            ]
+          }
+        ]
+      }
+    ]
+  });
+
+  console.log(`[${now()}] Sent: ${issue.title} [Tags: ${labels}]`);
+  sentIssues.push(issue.id.toString());
+}
 
     saveSentIssues();
 
