@@ -122,6 +122,11 @@ const lastSentId = sentIssues[0] || "none";
 
 // --- EXPRESS SERVER FOR RENDER OR FLY.IO ---
 const app = express();
+app.get("/run", async (req, res) => {
+  console.log(`[${now()}] Triggered by UptimeRobot`);
+  await checkIssues();
+  res.send("checked");
+});
 app.get("/", (req, res) => res.send("GitHub Issue Notifier Alive"));
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
