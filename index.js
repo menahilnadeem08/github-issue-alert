@@ -1,6 +1,6 @@
-import fs from 'fs';
-import path from 'path';
-import axios from 'axios';
+const fs = require('fs');
+const path = require('path');
+const axios = require('axios');
 
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const REPO = process.env.GITHUB_REPOSITORY; // e.g., "Expensify/App"
@@ -37,8 +37,7 @@ async function fetchOpenIssues() {
         per_page: 50, // adjust if needed
         sort: 'created',
         direction: 'asc',
-        // Add filter if you want specific labels
-        // labels: 'DeployBlockerCash,Engineering'
+        // labels: 'DeployBlockerCash,Engineering' // optional filter
     };
 
     const headers = {
@@ -86,5 +85,6 @@ async function checkIssues() {
     }
 }
 
-checkIssues(); // run immediately
+// Run immediately, then every 5 minutes
+checkIssues();
 setInterval(checkIssues, 5 * 60 * 1000);
