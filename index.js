@@ -2,7 +2,7 @@ const axios = require("axios");
 const express = require("express");
 const fs = require("fs");
 
-// Environment variables
+// --- CONFIG ---
 const REPO = process.env.REPO;                        
 const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;      
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;        
@@ -12,19 +12,12 @@ if (!REPO || !WEBHOOK) {
   process.exit(1);
 }
 
-// Optional GitHub headers
 const headers = {};
 if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
 
-// Track sent issues to avoid duplicates
+// --- TRACK SENT ISSUES ---
 const SENT_FILE = "sent_issues.json";
 let sentIssues = [];
-if (fs.existsSync(SENT_FILE)) {
-  sentIssues = JSON.parse(fs.readFileSync(SENT_FILE, "utf-8"));
-}
-
-// Lock to prevent concurrent sends
-let sending = false;
 
 // Pakistan local time
 function now() {
@@ -36,84 +29,95 @@ function saveSentIssues() {
   fs.writeFileSync(SENT_FILE, JSON.stringify(sentIssues), "utf-8");
 }
 
-// Main check function
+// --- INITIALIZE ON FIRST RUN ---
+// Skip sending existing open issues
+async function initSentIssues() {
+  if (!fs.existsSync(SENT_FILE)) {
+    try {
+      const res = await axios.get(
+        `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
+        { headers }
+      );
+      const issues = res.data.filter(i => !i.pull_request);
+      sentIssues = issues.map(i => i.id.toString());
+      saveSentIssues();
+      console.log(`[${now()}] Initialized sentIssues file — skipped existing open issues.`);
+    } catch (err) {
+      console.error(`[${now()}] Error initializing sent issues:`, err.message);
+    }
+  } else {
+    sentIssues = JSON.parse(fs.readFileSync(SENT_FILE, "utf-8"));
+  }
+}
+
+// --- CHECK FOR NEW ISSUES ---
+let sending = false;
+
 async function checkIssues() {
   if (sending) return;
   sending = true;
 
   try {
+    // Filter: only issues, state=open
     const res = await axios.get(
       `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
       { headers }
     );
 
-    // Only real issues (exclude pull requests)
     const issues = res.data.filter(item => !item.pull_request);
 
-    // Filter issues that haven't been sent
     const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
 
     if (newIssues.length === 0) {
-      console.log(`[${now()}] Checked — no new issues`);
+      console.log(`[${now()}] Checked — no new issues. Last sent ID: ${sentIssues.slice(-1)[0] || "none"}`);
     }
 
-    // Send each new issue
-for (const issue of newIssues.reverse()) { // send oldest first
-  // Extract labels
-  const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
+    for (const issue of newIssues.reverse()) { // send oldest first
+      const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
 
-  // Send to Google Chat using a simple card
-  await axios.post(WEBHOOK, {
-    cards: [
-      {
-        header: {
-          title: `New Issue Opened`,
-          subtitle: `Repo: ${REPO}`,
-        },
-        sections: [
+      // Send to Google Chat as a card
+      await axios.post(WEBHOOK, {
+        cards: [
           {
-            widgets: [
-              { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
-              { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
-              { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
+            header: {
+              title: `New Issue Opened`,
+              subtitle: `Repo: ${REPO}`,
+            },
+            sections: [
+              {
+                widgets: [
+                  { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
+                  { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
+                  { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
+                ]
+              }
             ]
           }
         ]
-      }
-    ]
-  });
+      });
 
-  console.log(`[${now()}] Sent: ${issue.title} [Tags: ${labels}]`);
-  sentIssues.push(issue.id.toString());
-}
+      console.log(`[${now()}] Sent: ${issue.title} [Tags: ${labels}]`);
+      sentIssues.push(issue.id.toString());
+    }
 
     saveSentIssues();
 
   } catch (err) {
-    console.log(`[${now()}] Error:`, err.message);
+    console.error(`[${now()}] Error checking issues:`, err.message);
   } finally {
     sending = false;
   }
 }
 
-// Run immediately, then every minute
-checkIssues();
-setInterval(checkIssues, 60 * 1000);
-
-// Minimal HTTP server for Render
+// --- EXPRESS SERVER FOR RENDER OR FLY.IO ---
 const app = express();
 app.get("/", (req, res) => res.send("GitHub Issue Notifier Alive"));
 const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
-// Self-ping to keep free-tier awake
-// Self-ping to keep free-tier awake
-setInterval(() => {
-  axios.get(`http://localhost:${port}/`)
-    .then(() => {
-      console.log(`[${now()}] Self-ping successful — service is awake`);
-    })
-    .catch(() => {
-      console.log(`[${now()}] Self-ping failed`);
-    });
-}, 5 * 60 * 1000); // every 5 minutes
+// --- START ---
+(async () => {
+  await initSentIssues();
+  checkIssues();                   // run immediately
+  setInterval(checkIssues, 60*1000); // every 1 min
+})();
