@@ -75,7 +75,7 @@ async function checkIssues() {
     const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
 
     if (newIssues.length === 0) {
-      const lastSentId = sentIssues.slice(-1)[0] || "none";
+const lastSentId = sentIssues[0] || "none";
       let lastNumber = "none";
       if (lastSentId !== "none") {
         const lastIssue = issues.find(i => i.id.toString() === lastSentId);
