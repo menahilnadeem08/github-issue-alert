@@ -1,135 +1,90 @@
-const axios = require("axios");
-const express = require("express");
-const fs = require("fs");
+import fs from 'fs';
+import path from 'path';
+import axios from 'axios';
 
-// --- CONFIG ---
-const REPO = process.env.REPO;                        
-const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;      
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;        
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const REPO = process.env.GITHUB_REPOSITORY; // e.g., "Expensify/App"
+const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;
 
-if (!REPO || !WEBHOOK) {
-  console.error("Error: REPO or GOOGLE_CHAT_WEBHOOK not set in environment variables.");
-  process.exit(1);
-}
+const LAST_ISSUE_FILE = path.resolve('./last_issue.json');
 
-const headers = {};
-if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
-
-// --- TRACK SENT ISSUES ---
-const SENT_FILE = "sent_issues.json";
-let sentIssues = [];
-
-// Pakistan local time
+// Helper to get current timestamp
 function now() {
-  return new Date().toLocaleString('en-PK', { hour12: false });
+    return new Date().toISOString().replace('T', ' ').split('.')[0];
 }
 
-// Save sent issues
-function saveSentIssues() {
-  fs.writeFileSync(SENT_FILE, JSON.stringify(sentIssues), "utf-8");
-}
-
-// --- INITIALIZE ON FIRST RUN ---
-// Skip sending existing open issues
-async function initSentIssues() {
-  if (!fs.existsSync(SENT_FILE)) {
+// Load last sent issues
+let sentIssues = [];
+if (fs.existsSync(LAST_ISSUE_FILE)) {
     try {
-      const res = await axios.get(
-        `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
-        { headers }
-      );
-      const issues = res.data.filter(i => !i.pull_request);
-      sentIssues = issues.map(i => i.id.toString());
-      saveSentIssues();
-      console.log(`[${now()}] Initialized sentIssues file — skipped existing open issues.`);
-    } catch (err) {
-      console.error(`[${now()}] Error initializing sent issues:`, err.message);
+        sentIssues = JSON.parse(fs.readFileSync(LAST_ISSUE_FILE, 'utf8'));
+    } catch (e) {
+        console.error('Failed to parse last_issue.json', e);
+        sentIssues = [];
     }
-  } else {
-    sentIssues = JSON.parse(fs.readFileSync(SENT_FILE, "utf-8"));
-  }
 }
 
-// --- CHECK FOR NEW ISSUES ---
-let sending = false;
+// Save last sent issues
+function saveSentIssues() {
+    fs.writeFileSync(LAST_ISSUE_FILE, JSON.stringify(sentIssues, null, 2));
+}
 
+// Fetch open issues from GitHub
+async function fetchOpenIssues() {
+    const url = `https://api.github.com/repos/${REPO}/issues`;
+    const params = {
+        state: 'open',
+        per_page: 50, // adjust if needed
+        sort: 'created',
+        direction: 'asc',
+        // Add filter if you want specific labels
+        // labels: 'DeployBlockerCash,Engineering'
+    };
+
+    const headers = {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+    };
+
+    const res = await axios.get(url, { params, headers });
+    // Filter out pull requests (issues with "pull_request" key)
+    return res.data.filter(issue => !issue.pull_request);
+}
+
+// Send a message to Google Chat
+async function sendToChat(issue) {
+    const labels = issue.labels.map(l => l.name).join(', ') || 'No Labels';
+    const text = `New Issue Opened\n#${issue.number}: ${issue.title}\nID: ${issue.id}\nLabels: ${labels}\n${issue.html_url}`;
+    await axios.post(WEBHOOK, { text });
+}
+
+// Main scheduler
 async function checkIssues() {
-  if (sending) return;
-  sending = true;
+    try {
+        const issues = await fetchOpenIssues();
 
-  try {
-    // Filter: only issues, state=open
-    const res = await axios.get(
-      `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
-      { headers }
-      
-    );
-      console.log(`Issue #${res.data.number} has internal ID: ${res.data.id}`);
+        // Filter new issues
+        const lastSentId = sentIssues.slice(-1)[0]?.id || 0;
+        const newIssues = issues.filter(issue => issue.id > lastSentId);
 
+        if (newIssues.length === 0) {
+            const lastSent = sentIssues.slice(-1)[0] || { number: "none", id: "none" };
+            console.log(`[${now()}] Checked — no new issues. Last sent: Number: ${lastSent.number}, ID: ${lastSent.id}`);
+            return;
+        }
 
-    const issues = res.data.filter(item => !item.pull_request);
+        for (const issue of newIssues) {
+            console.log(`[${now()}] Sending Issue #${issue.number} with internal ID: ${issue.id}`);
+            await sendToChat(issue);
+            sentIssues.push({ number: issue.number, id: issue.id });
+        }
 
-    const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
+        saveSentIssues();
 
-if (newIssues.length === 0) {
-  const lastSentId = sentIssues.slice(-1)[0] || "none";
-  let lastNumber = "none";
-
-  // Try to get the issue number for the last sent ID
-  if (lastSentId !== "none") {
-    const lastIssue = issues.find(i => i.id.toString() === lastSentId);
-    if (lastIssue) lastNumber = lastIssue.number;
-  }
-
-  console.log(`[${now()}] Checked — no new issues. Last sent: Number: ${lastNumber}, ID: ${lastSentId}`);
-}
-
-    for (const issue of newIssues.reverse()) { // send oldest first
-      const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
-
-      // Send to Google Chat as a card
-      await axios.post(WEBHOOK, {
-        cards: [
-          {
-            header: {
-              title: `New Issue Opened`,
-              subtitle: `Repo: ${REPO}`,
-            },
-            sections: [
-              {
-                widgets: [
-                  { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
-                  { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
-                  { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
-                ]
-              }
-            ]
-          }
-        ]
-      });
-
-      console.log(`[${now()}] Sent: ${issue.title} [Tags: ${labels}]`);
-      sentIssues.push(issue.id.toString());
+    } catch (err) {
+        console.error(`[${now()}] Error checking issues:`, err.message);
     }
-
-    saveSentIssues();
-
-  } catch (err) {
-    console.error(`[${now()}] Error checking issues:`, err.message);
-  } finally {
-    sending = false;
-  }
 }
 
-// --- EXPRESS SERVER FOR RENDER OR FLY.IO ---
-const app = express();
-app.get("/", (req, res) => res.send("GitHub Issue Notifier Alive"));
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
-
-// --- START ---
-(async () => {
-  await initSentIssues();
-  checkIssues();                   // run immediately
-  setInterval(checkIssues, 60*1000); // every 1 min
-})();
+checkIssues(); // run immediately
+setInterval(checkIssues, 1 * 60 * 1000);
