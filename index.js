@@ -86,6 +86,13 @@ const port = process.env.PORT || 3000;
 app.listen(port, () => console.log(`Server running on port ${port}`));
 
 // Self-ping to keep free-tier awake
+// Self-ping to keep free-tier awake
 setInterval(() => {
-  axios.get(`http://localhost:${port}/`).catch(() => {});
-}, 5 * 60 * 1000);
+  axios.get(`http://localhost:${port}/`)
+    .then(() => {
+      console.log(`[${now()}] Self-ping successful — service is awake`);
+    })
+    .catch(() => {
+      console.log(`[${now()}] Self-ping failed`);
+    });
+}, 5 * 60 * 1000); // every 5 minutes
