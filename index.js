@@ -1,57 +1,71 @@
-// github-issue-alert.js
 const axios = require("axios");
 const express = require("express");
 const fs = require("fs");
-
+require("dotenv").config();
 // --- CONFIG ---
-const REPO = process.env.REPO;                        
-const WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;      
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;        
+const REPO = process.env.REPO;
+const GOOGLE_CHAT_WEBHOOK = process.env.GOOGLE_CHAT_WEBHOOK;
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 
-if (!REPO || !WEBHOOK) {
-  console.error("Error: REPO or GOOGLE_CHAT_WEBHOOK not set in environment variables.");
+if (!REPO || !GOOGLE_CHAT_WEBHOOK) {
+  console.error("Error: REPO or GOOGLE_CHAT_WEBHOOK not set.");
   process.exit(1);
 }
 
 const headers = {};
 if (GITHUB_TOKEN) headers['Authorization'] = `token ${GITHUB_TOKEN}`;
 
-// --- TRACK SENT ISSUES ---
+// --- FILES ---
 const SENT_FILE = "sent_issues.json";
-let sentIssues = [];
+const LABEL_FILE = "issue_labels.json";
 
-// Pakistan local time
+let sentIssues = [];
+let labelState = {};
+
+// Pakistan time
 function now() {
   return new Date().toLocaleString('en-PK', { hour12: false });
 }
 
-// Save sent issues
 function saveSentIssues() {
-  fs.writeFileSync(SENT_FILE, JSON.stringify(sentIssues, null, 2), "utf-8");
+  fs.writeFileSync(SENT_FILE, JSON.stringify(sentIssues, null, 2));
 }
 
-// --- INITIALIZE ON FIRST RUN ---
-// Skip sending existing open issues
+function saveLabelState() {
+  fs.writeFileSync(LABEL_FILE, JSON.stringify(labelState, null, 2));
+}
+
+// --- INIT ---
 async function initSentIssues() {
-  if (!fs.existsSync(SENT_FILE)) {
-    try {
+  try {
+    if (fs.existsSync(SENT_FILE)) {
+      sentIssues = JSON.parse(fs.readFileSync(SENT_FILE));
+    }
+
+    if (fs.existsSync(LABEL_FILE)) {
+      labelState = JSON.parse(fs.readFileSync(LABEL_FILE));
+    }
+
+    // first run skip existing
+    if (sentIssues.length === 0) {
       const res = await axios.get(
         `https://api.github.com/repos/${REPO}/issues?per_page=10&state=open&sort=created&direction=desc`,
         { headers }
       );
+
       const issues = res.data.filter(i => !i.pull_request);
       sentIssues = issues.map(i => i.id.toString());
       saveSentIssues();
-      console.log(`[${now()}] Initialized sentIssues — skipped existing open issues.`);
-    } catch (err) {
-      console.error(`[${now()}] Error initializing sent issues:`, err.message);
+
+      console.log(`[${now()}] Initialized sentIssues`);
     }
-  } else {
-    sentIssues = JSON.parse(fs.readFileSync(SENT_FILE, "utf-8"));
+
+  } catch (err) {
+    console.error(`[${now()}] Init error:`, err.message);
   }
 }
 
-// --- CHECK FOR NEW ISSUES ---
+// --- CHECK ---
 let sending = false;
 
 async function checkIssues() {
@@ -64,76 +78,119 @@ async function checkIssues() {
       { headers }
     );
 
-    const issues = res.data.filter(item => !item.pull_request);
+    const issues = res.data.filter(i => !i.pull_request);
 
-    // Logging each issue
-    issues.forEach(issue => {
-      console.log(`Detected Issue #${issue.number} with internal ID: ${issue.id}`);
-    });
+    // -------------------------
+    // NEW ISSUE DETECTION
+    // -------------------------
+    const newIssues = issues.filter(
+      issue => !sentIssues.includes(issue.id.toString())
+    );
 
-    // Filter new issues
-    const newIssues = issues.filter(issue => !sentIssues.includes(issue.id.toString()));
-
-    if (newIssues.length === 0) {
-const lastSentId = sentIssues[0] || "none";
-      let lastNumber = "none";
-      if (lastSentId !== "none") {
-        const lastIssue = issues.find(i => i.id.toString() === lastSentId);
-        if (lastIssue) lastNumber = lastIssue.number;
-      }
-      console.log(`[${now()}] Checked — no new issues. Last sent: Number: ${lastNumber}, ID: ${lastSentId}`);
-    }
-
-    for (const issue of newIssues.reverse()) { // send oldest first
+    for (const issue of newIssues.reverse()) {
       const labels = issue.labels.map(l => l.name).join(", ") || "No tags";
 
-      await axios.post(WEBHOOK, {
-        cards: [
-          {
-            header: {
-              title: `New Issue Opened`,
-              subtitle: `Repo: ${REPO}`,
-            },
-            sections: [
-              {
-                widgets: [
-                  { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
-                  { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
-                  { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
-                ]
-              }
+      await axios.post(GOOGLE_CHAT_WEBHOOK, {
+        cards: [{
+          header: {
+            title: "New Issue Opened",
+            subtitle: `Repo: ${REPO}`
+          },
+          sections: [{
+            widgets: [
+              { textParagraph: { text: `<b>Title:</b> ${issue.title}` } },
+              { textParagraph: { text: `<b>URL:</b> <a href="${issue.html_url}">${issue.html_url}</a>` } },
+              { textParagraph: { text: `<b>Tags:</b> ${labels}` } }
             ]
-          }
-        ]
+          }]
+        }]
       });
 
-      console.log(`[${now()}] Sent: ${issue.title} [Tags: ${labels}]`);
+      console.log(`[${now()}] Sent new issue #${issue.number}`);
       sentIssues.push(issue.id.toString());
     }
 
+    // -------------------------
+    // LABEL CHANGE DETECTION
+    // -------------------------
+    const watchLabels = ["help wanted", "external"];
+    const issuesToCheck = issues; // keep monitoring all fetched issues
+
+    for (const issue of issuesToCheck) {
+      const id = issue.id.toString();
+      const current = issue.labels.map(l => l.name);
+      const previous = labelState[id] || [];
+
+      // Normalize label comparisons to lowercase for stable matching
+      const currentLower = current.map(l => l.toLowerCase());
+      const previousLower = previous.map(l => l.toLowerCase());
+
+      const added = current.filter(l => !previousLower.includes(l.toLowerCase()));
+      const removed = previous.filter(l => !currentLower.includes(l.toLowerCase()));
+
+      const addedWatch = added.filter(l => watchLabels.includes(l.toLowerCase()));
+      const removedWatch = removed.filter(l => watchLabels.includes(l.toLowerCase()));
+
+      if (addedWatch.length || removedWatch.length) {
+        await axios.post(GOOGLE_CHAT_WEBHOOK, {
+          cards: [{
+            header: {
+              title: "Label Change Detected",
+              subtitle: `Repo: ${REPO}`
+            },
+            sections: [{
+              widgets: [{
+                textParagraph: {
+                  text:
+                    `<b>Issue:</b> <a href="${issue.html_url}">#${issue.number}</a><br>` +
+                    `<b>Added:</b> ${addedWatch.join(", ") || "None"}<br>` +
+                    `<b>Removed:</b> ${removedWatch.join(", ") || "None"}`
+                }
+              }]
+            }]
+          }]
+        });
+
+        console.log(`[${now()}] Label change on #${issue.number}`);
+      }
+
+      labelState[id] = current;
+    }
+
     saveSentIssues();
+    saveLabelState();
+
+    if (newIssues.length === 0) {
+      console.log(`[${now()}] Checked — no new issues`);
+    }
 
   } catch (err) {
-    console.error(`[${now()}] Error checking issues:`, err.message);
+    console.error(`[${now()}] Error:`, err.message);
   } finally {
     sending = false;
   }
 }
 
-// --- EXPRESS SERVER FOR RENDER OR FLY.IO ---
+// --- SERVER ---
 const app = express();
+
 app.get("/run", async (req, res) => {
   console.log(`[${now()}] Triggered by UptimeRobot`);
   await checkIssues();
   res.send("checked");
 });
-app.get("/", (req, res) => res.send("GitHub Issue Notifier Alive"));
-const port = process.env.PORT || 3000;
-app.listen(port, () => console.log(`Server running on port ${port}`));
 
-// --- START ---
+app.get("/", (req, res) => {
+  res.send("GitHub Issue Notifier Alive");
+});
+
+const port = process.env.PORT || 3000;
+app.listen(port, () => console.log(`Server running on ${port}`));
+
+// --- SCHEDULED CHECK ---
+// Runs immediately after startup, and then every 60 seconds.
 (async () => {
   await initSentIssues();
-  checkIssues();                    // run immediately
-  setInterval(checkIssues, 60*1000); // every 1 min
+  await checkIssues();
+  setInterval(checkIssues, 60 * 1000);
 })();
